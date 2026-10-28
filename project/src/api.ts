@@ -1,0 +1,82 @@
+import type { LocalData } from '@/localData';
+
+export interface ApiStatus {
+  backend: 'ok';
+  storage: 'sqlite';
+  llm: {
+    configured: boolean;
+    enabled: boolean;
+    model: string | null;
+    mode: 'ai' | 'demo';
+  };
+  scheduledJobs: false;
+}
+
+interface ApiError {
+  error?: string;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...init?.headers,
+      },
+    });
+  } catch {
+    throw new Error('Somnia backend is unavailable. Start it with `npm run dev:all`.');
+  }
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message =
+      body && typeof body === 'object' && 'error' in body &&
+      typeof (body as ApiError).error === 'string'
+        ? (body as ApiError).error
+        : `Somnia backend request failed (${response.status}).`;
+    throw new Error(message);
+  }
+  return body as T;
+}
+
+export async function getApiStatus(): Promise<ApiStatus> {
+  return request<ApiStatus>('/api/health');
+}
+
+export async function getServerData(): Promise<{ data: LocalData | null }> {
+  return request<{ data: LocalData | null }>('/api/data');
+}
+
+export async function saveServerData(data: LocalData): Promise<void> {
+  await request<{ ok: true }>('/api/data', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function clearServerData(): Promise<void> {
+  await request<{ ok: true }>('/api/data', { method: 'DELETE' });
+}
+
+export async function sendChatMessage(
+  message: string,
+  history: Array<{ role: 'user' | 'somnia'; text: string }>,
+  allowExternalAI: boolean,
+): Promise<{ mode: 'ai' | 'demo'; text?: string }> {
+  return request<{ mode: 'ai' | 'demo'; text?: string }>('/api/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message, history, allowExternalAI }),
+  });
+}
+
+export async function runServerSleepCycle(): Promise<LocalData> {
+  const result = await request<{ data: LocalData }>('/api/sleep-cycle', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': crypto.randomUUID() },
+    body: JSON.stringify({}),
+  });
+  return result.data;
+}
