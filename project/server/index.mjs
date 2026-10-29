@@ -170,6 +170,16 @@ function mapRows(query, mapper) {
   return database.prepare(query).all().map(mapper);
 }
 
+function mapMemoryRow(row) {
+  return {
+    id: row.id,
+    text: row.text,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    status: row.status,
+  };
+}
+
 function readData() {
   const settings = database.prepare('SELECT theme, allow_external_ai FROM app_settings WHERE id = 1').get();
   if (!settings) return null;
@@ -507,6 +517,97 @@ const server = createServer(async (request, response) => {
       }
       return respond(response, 200, { data: readData() });
     }
+    // POST /api/memories — create a new memory
+    if (url.pathname === '/api/memories' && request.method === 'POST') {
+      const body = await readJson(request);
+      if (!isText(body.text) || body.text.trim().length === 0 || body.text.length > 8000) {
+        throw new HttpError(400, 'Memory text must be a non-empty string of up to 8000 characters.');
+      }
+      const id = crypto.randomUUID();
+      const now = new Date().toISOString();
+      database.prepare(
+        'INSERT INTO memories (id, text, created_at, updated_at, status) VALUES (?, ?, ?, ?, ?)',
+      ).run(id, body.text.trim(), now, now, 'approved');
+      const row = database.prepare(
+        'SELECT id, text, created_at, updated_at, status FROM memories WHERE id = ?',
+      ).get(id);
+      return respond(response, 201, mapMemoryRow(row));
+    }
+
+    // GET /api/memories — list all memories
+    if (url.pathname === '/api/memories' && request.method === 'GET') {
+      const rows = database.prepare(
+        'SELECT id, text, created_at, updated_at, status FROM memories ORDER BY rowid DESC',
+      ).all();
+      return respond(response, 200, { memories: rows.map(mapMemoryRow) });
+    }
+
+    // Routes that operate on a specific memory ID
+    const approveMatch = /^\/api\/memories\/([^/]+)\/approve$/.exec(url.pathname);
+    const memoryMatch = /^\/api\/memories\/([^/]+)$/.exec(url.pathname);
+
+    // PATCH /api/memories/:id/approve — set status to approved
+    if (approveMatch && request.method === 'PATCH') {
+      const id = decodeURIComponent(approveMatch[1]);
+      const now = new Date().toISOString();
+      const result = database.prepare(
+        "UPDATE memories SET status = 'approved', updated_at = ? WHERE id = ?",
+      ).run(now, id);
+      if (result.changes === 0) throw new HttpError(404, 'Memory not found.');
+      const row = database.prepare(
+        'SELECT id, text, created_at, updated_at, status FROM memories WHERE id = ?',
+      ).get(id);
+      return respond(response, 200, mapMemoryRow(row));
+    }
+
+    if (memoryMatch) {
+      const id = decodeURIComponent(memoryMatch[1]);
+
+      // GET /api/memories/:id — retrieve a single memory
+      if (request.method === 'GET') {
+        const row = database.prepare(
+          'SELECT id, text, created_at, updated_at, status FROM memories WHERE id = ?',
+        ).get(id);
+        if (!row) throw new HttpError(404, 'Memory not found.');
+        return respond(response, 200, mapMemoryRow(row));
+      }
+
+      // PATCH /api/memories/:id — edit text and/or status
+      if (request.method === 'PATCH') {
+        const body = await readJson(request);
+        if (body.text !== undefined && (!isText(body.text) || body.text.trim().length === 0 || body.text.length > 8000)) {
+          throw new HttpError(400, 'Memory text must be a non-empty string of up to 8000 characters.');
+        }
+        if (body.status !== undefined && !['approved', 'archived'].includes(body.status)) {
+          throw new HttpError(400, 'Memory status must be "approved" or "archived".');
+        }
+        if (body.text === undefined && body.status === undefined) {
+          throw new HttpError(400, 'Provide at least one of text or status to update.');
+        }
+        const existing = database.prepare(
+          'SELECT id, text, status FROM memories WHERE id = ?',
+        ).get(id);
+        if (!existing) throw new HttpError(404, 'Memory not found.');
+        const newText = body.text !== undefined ? body.text.trim() : existing.text;
+        const newStatus = body.status !== undefined ? body.status : existing.status;
+        const now = new Date().toISOString();
+        database.prepare(
+          'UPDATE memories SET text = ?, status = ?, updated_at = ? WHERE id = ?',
+        ).run(newText, newStatus, now, id);
+        const row = database.prepare(
+          'SELECT id, text, created_at, updated_at, status FROM memories WHERE id = ?',
+        ).get(id);
+        return respond(response, 200, mapMemoryRow(row));
+      }
+
+      // DELETE /api/memories/:id — delete a memory
+      if (request.method === 'DELETE') {
+        const result = database.prepare('DELETE FROM memories WHERE id = ?').run(id);
+        if (result.changes === 0) throw new HttpError(404, 'Memory not found.');
+        return respond(response, 200, { ok: true });
+      }
+    }
+
     return respond(response, 404, { error: 'API route not found.' });
   } catch (error) {
     const status = error instanceof HttpError ? error.status : 500;

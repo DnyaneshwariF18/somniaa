@@ -1,4 +1,4 @@
-import type { LocalData } from '@/localData';
+import type { LocalData, LocalMemory } from '@/localData';
 
 export interface ApiStatus {
   backend: 'ok';
@@ -79,4 +79,44 @@ export async function runServerSleepCycle(): Promise<LocalData> {
     body: JSON.stringify({}),
   });
   return result.data;
+}
+
+// ─── Memory CRUD ─────────────────────────────────────────────────────────────
+
+export async function createMemory(text: string): Promise<LocalMemory> {
+  return request<LocalMemory>('/api/memories', {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function listMemories(): Promise<LocalMemory[]> {
+  const result = await request<{ memories: LocalMemory[] }>('/api/memories');
+  return result.memories;
+}
+
+export async function getMemory(id: string): Promise<LocalMemory> {
+  return request<LocalMemory>(`/api/memories/${encodeURIComponent(id)}`);
+}
+
+export async function approveMemory(id: string): Promise<LocalMemory> {
+  return request<LocalMemory>(`/api/memories/${encodeURIComponent(id)}/approve`, {
+    method: 'PATCH',
+  });
+}
+
+export async function editMemory(
+  id: string,
+  patch: { text?: string; status?: 'approved' | 'archived' },
+): Promise<LocalMemory> {
+  return request<LocalMemory>(`/api/memories/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteMemory(id: string): Promise<void> {
+  await request<{ ok: true }>(`/api/memories/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
 }

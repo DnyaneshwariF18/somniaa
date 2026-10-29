@@ -188,3 +188,105 @@ test('persists data, gates external AI, retrieves approved context, and retries 
   assert.equal(retryRun.data.sleepRuns.length, 1);
   assert.deepEqual(retryRun.data.sleepRuns[0].staleMemoryIds, ['approved-memory']);
 });
+
+test('memory CRUD endpoints work correctly', async () => {
+  // ── Create ────────────────────────────────────────────────────────────────
+  const createResponse = await fetch(`${backendUrl}/api/memories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'I prefer dark mode interfaces.' }),
+  });
+  assert.equal(createResponse.status, 201, 'create returns 201');
+  const created = await createResponse.json();
+  assert.equal(typeof created.id, 'string', 'has id');
+  assert.equal(created.text, 'I prefer dark mode interfaces.');
+  assert.equal(created.status, 'approved', 'new memory is approved by default');
+  assert.equal(typeof created.createdAt, 'string', 'has createdAt');
+  assert.equal(typeof created.updatedAt, 'string', 'has updatedAt');
+
+  // ── List ──────────────────────────────────────────────────────────────────
+  const listResponse = await fetch(`${backendUrl}/api/memories`);
+  assert.equal(listResponse.status, 200);
+  const { memories } = await listResponse.json();
+  assert.ok(Array.isArray(memories), 'memories is an array');
+  const found = memories.find((m) => m.id === created.id);
+  assert.ok(found, 'created memory appears in list');
+
+  // ── Get by ID ─────────────────────────────────────────────────────────────
+  const getResponse = await fetch(`${backendUrl}/api/memories/${created.id}`);
+  assert.equal(getResponse.status, 200);
+  const fetched = await getResponse.json();
+  assert.equal(fetched.id, created.id);
+  assert.equal(fetched.text, created.text);
+
+  // ── Edit text + status → archived ─────────────────────────────────────────
+  const editResponse = await fetch(`${backendUrl}/api/memories/${created.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'I prefer dark mode interfaces (updated).', status: 'archived' }),
+  });
+  assert.equal(editResponse.status, 200);
+  const edited = await editResponse.json();
+  assert.equal(edited.text, 'I prefer dark mode interfaces (updated).');
+  assert.equal(edited.status, 'archived');
+  assert.notEqual(edited.updatedAt, created.updatedAt, 'updatedAt changes on edit');
+
+  // ── Approve shortcut ──────────────────────────────────────────────────────
+  const approveResponse = await fetch(`${backendUrl}/api/memories/${created.id}/approve`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  assert.equal(approveResponse.status, 200);
+  const approved = await approveResponse.json();
+  assert.equal(approved.status, 'approved');
+
+  // ── Input validation ──────────────────────────────────────────────────────
+  const emptyText = await fetch(`${backendUrl}/api/memories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: '   ' }),
+  });
+  assert.equal(emptyText.status, 400, 'rejects blank text');
+
+  const badStatus = await fetch(`${backendUrl}/api/memories/${created.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'pending' }),
+  });
+  assert.equal(badStatus.status, 400, 'rejects invalid status');
+
+  const emptyPatch = await fetch(`${backendUrl}/api/memories/${created.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  assert.equal(emptyPatch.status, 400, 'rejects empty patch body');
+
+  // ── 404 on unknown ID ─────────────────────────────────────────────────────
+  const notFound = await fetch(`${backendUrl}/api/memories/does-not-exist`);
+  assert.equal(notFound.status, 404);
+  assert.match((await notFound.json()).error, /not found/i);
+
+  const approveNotFound = await fetch(`${backendUrl}/api/memories/does-not-exist/approve`, {
+    method: 'PATCH',
+  });
+  assert.equal(approveNotFound.status, 404);
+
+  // ── Delete ────────────────────────────────────────────────────────────────
+  const deleteResponse = await fetch(`${backendUrl}/api/memories/${created.id}`, {
+    method: 'DELETE',
+  });
+  assert.equal(deleteResponse.status, 200);
+  assert.deepEqual(await deleteResponse.json(), { ok: true });
+
+  // Confirm it is gone
+  const afterDelete = await fetch(`${backendUrl}/api/memories/${created.id}`);
+  assert.equal(afterDelete.status, 404, 'deleted memory is no longer retrievable');
+
+  // Delete non-existent → 404
+  const deleteAgain = await fetch(`${backendUrl}/api/memories/${created.id}`, {
+    method: 'DELETE',
+  });
+  assert.equal(deleteAgain.status, 404, 'deleting a non-existent memory returns 404');
+});
+
