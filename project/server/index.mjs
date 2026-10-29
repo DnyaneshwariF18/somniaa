@@ -326,7 +326,8 @@ function llmConfiguration() {
     configured,
     apiKey,
     model,
-    baseUrl: (process.env.SOMNIA_AI_BASE_URL?.trim() || 'https://api.openai.com/v1').replace(/\/+$/, ''),
+    baseUrl: (process.env.SOMNIA_AI_BASE_URL?.trim() || 'https://api.tokenfactory.nebius.com/v1').replace(/\/+$/, ''),
+    provider: (process.env.SOMNIA_AI_BASE_URL?.trim() || 'https://api.tokenfactory.nebius.com/v1').includes('nebius') ? 'Nebius Token Factory' : 'OpenAI-compatible',
   };
 }
 
@@ -470,6 +471,7 @@ const server = createServer(async (request, response) => {
           configured: config.configured,
           enabled,
           model: config.configured ? config.model : null,
+          provider: config.configured ? config.provider : null,
           mode: config.configured && enabled ? 'ai' : 'demo',
         },
         scheduledJobs: false,
@@ -635,7 +637,7 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`Somnia backend listening at http://127.0.0.1:${port}`);
   console.log(`SQLite database: ${databasePath}`);
   const config = llmConfiguration();
-  console.log(`LLM provider: ${config.configured ? `configured (${config.model})` : 'not configured; demo mode'}`);
+  console.log(`LLM provider: ${config.configured ? `configured (${config.provider} - ${config.model})` : 'not configured; demo mode'}`);
 });
 
 function shutdown() {

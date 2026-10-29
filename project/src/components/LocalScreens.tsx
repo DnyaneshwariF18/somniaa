@@ -520,13 +520,23 @@ export function SettingsScreen({
         </div>
       </Card>
       <Card>
-        <h2 className="text-base font-medium text-white">AI data sharing</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-medium text-white">Nebius AI & Data Sharing</h2>
+          <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs ${
+            apiStatus?.llm.mode === 'ai'
+              ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+              : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+          }`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${apiStatus?.llm.mode === 'ai' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+            {apiStatus?.llm.mode === 'ai' ? 'Nebius AI Active' : 'Offline Demo Mode'}
+          </span>
+        </div>
         <p className="mt-2 text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
           {!apiStatus
             ? 'The backend status is unavailable. Chat cannot reach the local service.'
             : apiStatus.llm.configured
-              ? `An OpenAI-compatible provider is configured on the backend (${apiStatus.llm.model}).`
-              : 'No AI provider is configured. Chat stays in clearly labelled demo mode.'}
+              ? `Connected to ${apiStatus.llm.provider || 'Nebius Token Factory'} (${apiStatus.llm.model || 'nvidia/nemotron-3-super-120b-a12b'}).`
+              : 'Currently in offline Demo Mode. To connect Nebius Token Factory, add your API key to project/.env.'}
           {' '}If enabled, Somnia sends your message, a small recent chat window, and only relevant approved memories or recorded decisions to that provider.
           The provider processes this data under its own terms.
         </p>

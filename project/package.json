@@ -9,6 +9,7 @@
     "dev:backend": "node server/index.mjs",
     "dev:all": "node scripts/dev.mjs",
     "test:backend": "node --test tests/backend.test.mjs tests/dev-start.test.mjs",
+    "test:live": "node scripts/nebius-smoke-test.mjs",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",

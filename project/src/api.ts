@@ -7,6 +7,7 @@ export interface ApiStatus {
     configured: boolean;
     enabled: boolean;
     model: string | null;
+    provider?: string | null;
     mode: 'ai' | 'demo';
   };
   scheduledJobs: false;

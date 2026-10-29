@@ -1,0 +1,33 @@
+# Dependencies and build outputs
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Environment files and secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+
+# Local SQLite databases and storage
+/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+data/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE and OS files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+

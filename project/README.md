@@ -16,7 +16,7 @@ To run only one process, use `npm run dev:backend` or `npm run dev:frontend`; th
 
 - SQLite is created at `data/somnia.sqlite` on first run. Set `SOMNIA_DB_PATH` to choose another local path.
 - Without provider credentials, chat explicitly runs in demo mode. Demo responses are examples, not LLM output.
-- To connect an OpenAI-compatible provider, copy `.env.example` to `.env` and set `SOMNIA_AI_BASE_URL`, `SOMNIA_AI_API_KEY`, and `SOMNIA_AI_MODEL`. Never put credentials in frontend files or commit `.env`.
+- To connect Nebius Token Factory, copy `.env.example` to `.env` and set `SOMNIA_AI_BASE_URL` (default: `https://api.tokenfactory.nebius.com/v1/`), `SOMNIA_AI_API_KEY`, and `SOMNIA_AI_MODEL` (e.g. `nvidia/nemotron-3-super-120b-a12b`). Never put credentials in frontend files or commit `.env`.
 - External AI sharing is off by default. A user must enable it in Settings. When enabled, Somnia sends the current message, up to eight recent chat messages, and a small set of relevant approved memories and recorded decisions. Provider terms and charges may apply.
 - Chat, memories, reminders, decisions, Sleep Cycle history, and theme are persisted in SQLite and mirrored to browser local storage. Existing browser-only data is imported into an empty backend on first launch.
 - Sleep Cycle runs a real backend job when manually triggered and flags approved memories not updated in 180 days. It does not mutate memories, run automatically, or fabricate evaluation results.

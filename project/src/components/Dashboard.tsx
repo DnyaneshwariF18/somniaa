@@ -31,6 +31,15 @@ export default function Dashboard({ data, onNavigate }: DashboardProps) {
         aria-hidden="true"
       />
 
+      {/* Hackathon Track Badge */}
+      <div
+        className="fade-in mb-4 inline-flex items-center gap-2 rounded-full px-3.5 py-1 text-xs border border-white/10 glass"
+        style={{ color: 'var(--text-muted)', animationDelay: '0.05s' }}
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+        <span>Personal AI Track · Nebius Token Factory & NVIDIA Nemotron</span>
+      </div>
+
       {/* Small greeting */}
       <p
         className="fade-in mb-5 text-sm sm:text-base font-medium tracking-[0.18em] uppercase"
