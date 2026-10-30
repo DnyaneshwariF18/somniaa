@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Moon, Send, Plus, Sparkles } from 'lucide-react';
+import { AlertTriangle, Check, Moon, Send, Plus, Sparkles } from 'lucide-react';
 import { getDemoReply, SUGGESTIONS } from '@/chatResponses';
-import type { ApiStatus } from '@/api';
+import { createMemory, editMemory, type ApiStatus, type ChatProposalConflict, type ChatResponse } from '@/api';
+import type { LocalMemory } from '@/localData';
 
 export type ChatRole = 'user' | 'somnia';
 
@@ -11,16 +12,24 @@ export interface ChatMessage {
   text: string;
 }
 
+export interface MemoryProposalItem {
+  id: string;
+  text: string;
+  status: 'pending' | 'approved' | 'dismissed';
+  conflict?: ChatProposalConflict;
+}
+
 interface ChatProps {
   messages: ChatMessage[];
   apiStatus: ApiStatus | null;
   onSendMessage: (
     text: string,
     history: ChatMessage[],
-  ) => Promise<{ mode: 'ai' | 'demo'; text?: string }>;
+  ) => Promise<ChatResponse>;
   onMessagesChange: (
     updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[]),
   ) => void;
+  onMemorySaved?: (memory: LocalMemory) => void;
 }
 
 const nextId = () => crypto.randomUUID();
@@ -118,11 +127,19 @@ function WelcomeScreen({
   );
 }
 
-export default function Chat({ messages, apiStatus, onSendMessage, onMessagesChange }: ChatProps) {
+export default function Chat({
+  messages,
+  apiStatus,
+  onSendMessage,
+  onMessagesChange,
+  onMemorySaved,
+}: ChatProps) {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [responseMode, setResponseMode] = useState<'ai' | 'demo' | null>(null);
+  const [proposals, setProposals] = useState<MemoryProposalItem[]>([]);
+  const [savingProposalId, setSavingProposalId] = useState<string | null>(null);
   const replyCounter = useRef(0);
   const requestGeneration = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -134,7 +151,7 @@ export default function Chat({ messages, apiStatus, onSendMessage, onMessagesCha
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, isTyping]);
+  }, [messages, isTyping, proposals]);
 
   const send = async (raw: string) => {
     const text = raw.trim();
@@ -157,6 +174,19 @@ export default function Chat({ messages, apiStatus, onSendMessage, onMessagesCha
       if (requestGeneration.current !== generation) return;
       setResponseMode(result.mode);
       onMessagesChange((prev) => [...prev, { id: nextId(), role: 'somnia', text: replyText }]);
+
+      if (Array.isArray(result.proposals) && result.proposals.length > 0) {
+        const newItems: MemoryProposalItem[] = result.proposals.map((propText) => {
+          const conflict = result.conflicts?.find((c) => c.proposal === propText);
+          return {
+            id: nextId(),
+            text: propText,
+            status: 'pending',
+            conflict,
+          };
+        });
+        setProposals((prev) => [...prev, ...newItems]);
+      }
     } catch (reason) {
       if (requestGeneration.current === generation) {
         setSendError(reason instanceof Error ? reason.message : 'Somnia could not send your message.');
@@ -164,6 +194,47 @@ export default function Chat({ messages, apiStatus, onSendMessage, onMessagesCha
     } finally {
       if (requestGeneration.current === generation) setIsTyping(false);
     }
+  };
+
+  const handleApproveProposal = async (proposal: MemoryProposalItem) => {
+    if (savingProposalId) return;
+    setSavingProposalId(proposal.id);
+    try {
+      const created = await createMemory(proposal.text);
+      onMemorySaved?.(created);
+      setProposals((prev) =>
+        prev.map((p) => (p.id === proposal.id ? { ...p, status: 'approved' } : p)),
+      );
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Could not save approved memory.');
+    } finally {
+      setSavingProposalId(null);
+    }
+  };
+
+  const handleReplaceMemory = async (proposal: MemoryProposalItem) => {
+    if (savingProposalId || !proposal.conflict?.existingMemoryId) return;
+    setSavingProposalId(proposal.id);
+    try {
+      const updated = await editMemory(proposal.conflict.existingMemoryId, {
+        text: proposal.text,
+        status: 'approved',
+      });
+      onMemorySaved?.(updated);
+      setProposals((prev) =>
+        prev.map((p) => (p.id === proposal.id ? { ...p, status: 'approved' } : p)),
+      );
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Could not update existing memory.');
+    } finally {
+      setSavingProposalId(null);
+    }
+  };
+
+  const handleDismissProposal = (proposalId: string) => {
+    setProposals((prev) =>
+      prev.map((p) => (p.id === proposalId ? { ...p, status: 'dismissed' } : p)),
+    );
   };
 
   const handleSuggestion = (text: string) => {
@@ -175,6 +246,7 @@ export default function Chat({ messages, apiStatus, onSendMessage, onMessagesCha
     setIsTyping(false);
     setInput('');
     setSendError(null);
+    setProposals([]);
     onMessagesChange([]);
   };
 
@@ -255,6 +327,95 @@ export default function Chat({ messages, apiStatus, onSendMessage, onMessagesCha
               <MessageBubble key={m.id} message={m} />
             ))}
             {isTyping && <TypingIndicator />}
+            {proposals
+              .filter((p) => p.status !== 'dismissed')
+              .map((proposal) => (
+                <div
+                  key={proposal.id}
+                  className="fade-in w-full rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 shadow-lg backdrop-blur-sm transition-all"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-500/20 text-amber-300">
+                        <Sparkles size={13} />
+                      </span>
+                      <span className="text-xs font-semibold tracking-wide text-amber-300 uppercase">
+                        Memory Proposal
+                      </span>
+                    </div>
+                    {proposal.status === 'approved' && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/20 px-3 py-0.5 text-xs font-medium text-emerald-300">
+                        <Check size={12} /> Approved & Saved
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="mt-2 text-sm leading-relaxed text-white/95 font-medium">
+                    "{proposal.text}"
+                  </p>
+
+                  {proposal.conflict && (
+                    <div className="mt-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-200">
+                      <div className="flex items-center gap-1.5 font-medium text-amber-300">
+                        <AlertTriangle size={13} className="shrink-0" />
+                        <span>Potential Contradiction Detected</span>
+                      </div>
+                      <p className="mt-1 text-white/80">
+                        Conflicts with saved memory: <span className="italic text-white">"{proposal.conflict.existingMemory}"</span>
+                      </p>
+                      <p className="mt-0.5 text-amber-300 font-medium">
+                        {proposal.conflict.reason}
+                      </p>
+                    </div>
+                  )}
+
+                  {proposal.status === 'pending' ? (
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/5">
+                      <span className="text-xs text-white/60">
+                        {proposal.conflict
+                          ? 'Review contradiction before saving to memories:'
+                          : 'Explicit fact detected in your message. Save to memories?'}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => handleDismissProposal(proposal.id)}
+                          disabled={savingProposalId === proposal.id}
+                          className="glass rounded-full px-3 py-1.5 text-xs text-white/70 hover:text-white transition-colors"
+                        >
+                          Dismiss
+                        </button>
+                        {proposal.conflict?.existingMemoryId && (
+                          <button
+                            onClick={() => handleReplaceMemory(proposal)}
+                            disabled={savingProposalId === proposal.id}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/20 px-3.5 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-all disabled:opacity-50"
+                            title="Replace the conflicting memory with this updated fact"
+                          >
+                            <Check size={13} />
+                            {savingProposalId === proposal.id ? 'Replacing...' : 'Replace Existing'}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleApproveProposal(proposal)}
+                          disabled={savingProposalId === proposal.id}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/20 px-3.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/30 transition-all disabled:opacity-50"
+                        >
+                          <Check size={13} />
+                          {savingProposalId === proposal.id
+                            ? 'Saving...'
+                            : proposal.conflict
+                              ? 'Approve Anyway'
+                              : 'Approve Memory'}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-xs text-emerald-300/80">
+                      This memory is now approved and will be used as relevant context for future conversations.
+                    </p>
+                  )}
+                </div>
+              ))}
           </div>
         )}
       </div>

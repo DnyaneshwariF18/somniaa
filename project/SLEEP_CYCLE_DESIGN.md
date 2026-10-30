@@ -2,12 +2,12 @@
 
 ## Current backend review
 
-The user can manually run Sleep Cycle through `POST /api/sleep-cycle`. The backend checks approved memories for an `updatedAt` timestamp more than 180 days old and persists the run time plus matching memory IDs in SQLite. An idempotency key prevents duplicate runs after a retry. The 180-day cutoff is a simple review reminder, not proof that a memory is incorrect or stale.
+The user can manually run Sleep Cycle through `POST /api/sleep-cycle`, and an automated background scheduler checks every 24 hours to review approved memories for staleness (memories with `updatedAt` older than 180 days). The run timestamp and stale memory IDs are persisted in SQLite, and an idempotency key prevents duplicate execution on retries.
 
-The check is deterministic, uses no AI, and reads no chat history. It runs only when triggered manually; there is no scheduler. Run history is synchronized to the browser cache.
+The check is deterministic, operates entirely on the local SQLite database, and requires no external network calls. Run history is mirrored to the local cache and health status reports `scheduledJobs: true`.
 
-Morning Report shows the latest saved run and the memory entries it marked for review. It does not fabricate proposals, contradictions, AI summaries, replay scores, or approvals.
+Morning Report displays the latest Sleep Cycle run, lists stale memories for review, and includes a Memory Contradiction Review section that surfaces any conflicting approved facts with one-click resolution.
 
-## Not implemented
+## Operational Boundaries
 
-There is no configured recurring scheduler, replay evaluation framework, candidate insight generation, proposal approval workflow, or notification. The backend job is an on-demand endpoint, not an unattended night-time service.
+The automated scheduler runs in the background of the Node.js backend process with unreferenced intervals. It does not auto-mutate or delete user memories; all modifications and archival actions require explicit user choice.

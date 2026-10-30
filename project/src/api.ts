@@ -9,7 +9,21 @@ export interface ApiStatus {
     model: string | null;
     mode: 'ai' | 'demo';
   };
-  scheduledJobs: false;
+  scheduledJobs: boolean;
+}
+
+export interface ChatProposalConflict {
+  proposal: string;
+  existingMemoryId?: string;
+  existingMemory: string;
+  reason: string;
+}
+
+export interface ChatResponse {
+  mode: 'ai' | 'demo';
+  text?: string;
+  proposals?: string[];
+  conflicts?: ChatProposalConflict[];
 }
 
 interface ApiError {
@@ -65,8 +79,8 @@ export async function sendChatMessage(
   message: string,
   history: Array<{ role: 'user' | 'somnia'; text: string }>,
   allowExternalAI: boolean,
-): Promise<{ mode: 'ai' | 'demo'; text?: string }> {
-  return request<{ mode: 'ai' | 'demo'; text?: string }>('/api/chat', {
+): Promise<ChatResponse> {
+  return request<ChatResponse>('/api/chat', {
     method: 'POST',
     body: JSON.stringify({ message, history, allowExternalAI }),
   });
@@ -79,6 +93,16 @@ export async function runServerSleepCycle(): Promise<LocalData> {
     body: JSON.stringify({}),
   });
   return result.data;
+}
+
+export interface MemoryContradictionItem {
+  memoryA: LocalMemory;
+  memoryB: LocalMemory;
+  reason: string;
+}
+
+export async function getMemoryContradictions(): Promise<{ contradictions: MemoryContradictionItem[] }> {
+  return request<{ contradictions: MemoryContradictionItem[] }>('/api/memories/contradictions');
 }
 
 // ─── Memory CRUD ─────────────────────────────────────────────────────────────

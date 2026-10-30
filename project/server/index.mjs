@@ -7,7 +7,14 @@ const envPath = resolve('.env');
 if (existsSync(envPath)) process.loadEnvFile(envPath);
 
 const port = Number(process.env.SOMNIA_PORT ?? 8787);
-const databasePath = resolve(process.env.SOMNIA_DB_PATH ?? './data/somnia.sqlite');
+const defaultDb = existsSync('somnia.db')
+  ? 'somnia.db'
+  : existsSync('./data/somnia.db')
+    ? './data/somnia.db'
+    : existsSync('./data/somnia.sqlite')
+      ? './data/somnia.sqlite'
+      : 'somnia.db';
+const databasePath = resolve(process.env.SOMNIA_DB_PATH ?? defaultDb);
 const maxBodyBytes = 1024 * 1024;
 const themes = new Set(['somnia', 'neural', 'cosmic', 'quantum']);
 const roles = new Set(['user', 'somnia']);
@@ -295,22 +302,161 @@ function replaceData(rawData) {
   }
 }
 
-function tokenize(value) {
-  return new Set(value.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
+const STOP_WORDS = new Set([
+  'a', 'about', 'above', 'after', 'again', 'all', 'am', 'an', 'and', 'any',
+  'are', 'as', 'at', 'be', 'because', 'been', 'before', 'being', 'below', 'between',
+  'both', 'but', 'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'down',
+  'during', 'each', 'few', 'for', 'from', 'further', 'had', 'has', 'have', 'having',
+  'he', 'her', 'here', 'hers', 'herself', 'him', 'himself', 'his', 'how', 'i',
+  'if', 'in', 'into', 'is', 'it', 'its', 'itself', 'just', 'me', 'more',
+  'most', 'my', 'myself', 'no', 'nor', 'not', 'now', 'of', 'off', 'on',
+  'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
+  'same', 'she', 'should', 'so', 'some', 'such', 'than', 'that', 'the', 'their',
+  'theirs', 'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through',
+  'to', 'too', 'under', 'until', 'up', 'very', 'was', 'we', 'were', 'what',
+  'when', 'where', 'which', 'while', 'who', 'whom', 'why', 'will', 'with', 'would',
+  'you', 'your', 'yours', 'yourself', 'yourselves',
+]);
+
+const SYNONYMS = {
+  internship: ['intern', 'job', 'work', 'workplace', 'company', 'role'],
+  intern: ['internship', 'job', 'work', 'role'],
+  job: ['work', 'internship', 'intern', 'career', 'employment', 'position', 'company'],
+  work: ['job', 'internship', 'intern', 'career', 'employment', 'office', 'workplace', 'company'],
+  workplace: ['work', 'office', 'job', 'company', 'internship'],
+  company: ['employer', 'workplace', 'office', 'firm', 'organization', 'work'],
+  employer: ['company', 'workplace', 'work', 'firm'],
+  location: ['city', 'place', 'where', 'town', 'address', 'office'],
+  city: ['location', 'place', 'town', 'where'],
+  place: ['location', 'city', 'town'],
+  study: ['learning', 'notes', 'revision', 'preference', 'routine', 'habit'],
+  routine: ['habit', 'preference', 'schedule', 'routine'],
+  preference: ['routine', 'habit', 'choice', 'style', 'preference'],
+};
+
+function stem(word) {
+  if (typeof word !== 'string' || word.length <= 3) return word;
+  let s = word.toLowerCase();
+  // Strip common inflectional suffixes
+  s = s.replace(/(?:ing|edly|ed|es|s)$/i, '');
+  // Strip common derivational suffixes
+  s = s.replace(/(?:ship|ment|tions?|sions?|ences?|ances?|ness|ables?|ibles?|al|ive|ity|ous)$/i, '');
+  // Normalize double consonant endings (e.g. runn -> run)
+  s = s.replace(/(.)\1$/, '$1');
+  // Normalize terminal 'i' to 'y' (e.g. studi -> study, citi -> city)
+  if (s.endsWith('i') && s.length >= 3) s = s.slice(0, -1) + 'y';
+  return s.length >= 2 ? s : word;
 }
 
-function relevantRecords(table, query, columns, limit, where = '') {
-  const terms = tokenize(query);
-  if (terms.size === 0) return [];
+function extractTerms(text) {
+  if (typeof text !== 'string') return { tokens: new Set(), stems: new Set(), synonyms: new Set() };
+  const rawWords = text.toLowerCase().match(/[a-z0-9]{2,}/g) ?? [];
+  const contentWords = rawWords.filter((w) => !STOP_WORDS.has(w));
+  const effectiveWords = contentWords.length > 0 ? contentWords : rawWords;
+  const tokens = new Set(effectiveWords);
+  const stems = new Set();
+  const synonyms = new Set();
+
+  for (const w of effectiveWords) {
+    const s = stem(w);
+    if (s.length >= 2) stems.add(s);
+
+    const related = [
+      ...(SYNONYMS[w] ?? []),
+      ...(SYNONYMS[s] ?? []),
+    ];
+    for (const item of related) {
+      synonyms.add(item);
+      const itemStem = stem(item);
+      if (itemStem.length >= 2) stems.add(itemStem);
+    }
+  }
+
+  return { tokens, stems, synonyms };
+}
+
+function scoreRecord(queryTerms, recordTerms) {
+  if (queryTerms.tokens.size === 0 || recordTerms.tokens.size === 0) return 0;
+  let score = 0;
+
+  for (const qToken of queryTerms.tokens) {
+    // Tier 1: Exact token match
+    if (recordTerms.tokens.has(qToken)) {
+      score += 4;
+      continue;
+    }
+    // Tier 2: Stem match (e.g. internship -> intern, preferences -> prefer)
+    const qStem = stem(qToken);
+    if (recordTerms.stems.has(qStem)) {
+      score += 3;
+      continue;
+    }
+    // Tier 3: Prefix / substring match (minimum 4 chars)
+    if (qToken.length >= 4) {
+      let prefixMatch = false;
+      for (const rToken of recordTerms.tokens) {
+        if (rToken.length >= 4 && (rToken.startsWith(qToken) || qToken.startsWith(rToken))) {
+          score += 2;
+          prefixMatch = true;
+          break;
+        }
+      }
+      if (prefixMatch) continue;
+    }
+    if (qStem.length >= 4) {
+      let stemPrefixMatch = false;
+      for (const rStem of recordTerms.stems) {
+        if (rStem.length >= 4 && (rStem.startsWith(qStem) || qStem.startsWith(rStem))) {
+          score += 2;
+          stemPrefixMatch = true;
+          break;
+        }
+      }
+      if (stemPrefixMatch) continue;
+    }
+    // Tier 4: Concept synonym match
+    if (queryTerms.synonyms && queryTerms.synonyms.size > 0) {
+      for (const syn of queryTerms.synonyms) {
+        if (recordTerms.tokens.has(syn) || recordTerms.stems.has(syn)) {
+          score += 1;
+          break;
+        }
+      }
+    }
+  }
+
+  return score;
+}
+
+function tokenize(value) {
+  return new Set(value.toLowerCase().match(/[a-z0-9]{2,}/g) ?? []);
+}
+
+function relevantRecords(table, query, columns, limit, where = '', history = []) {
+  const queryTerms = extractTerms(query);
+  const recentTexts = Array.isArray(history)
+    ? history
+        .slice(-4)
+        .filter((item) => isObject(item) && (item.role === 'user' || item.role === 'somnia') && isText(item.text))
+        .map((item) => item.text)
+        .filter((text) => text.trim().toLowerCase() !== query.trim().toLowerCase())
+    : [];
+  const historyTerms = recentTexts.length > 0 ? extractTerms(recentTexts.join(' ')) : null;
+
+  if (queryTerms.tokens.size === 0 && (!historyTerms || historyTerms.tokens.size === 0)) return [];
+
   const rows = database.prepare(
     `SELECT ${columns.join(', ')} FROM ${table}${where ? ` WHERE ${where}` : ''}`,
   ).all();
+
   return rows
     .map((row) => {
       const content = columns.map((column) => row[column]).join(' ');
-      const tokens = tokenize(content);
-      const score = [...terms].filter((term) => tokens.has(term)).length;
-      return { row, score };
+      const recordTerms = extractTerms(content);
+      const queryScore = scoreRecord(queryTerms, recordTerms);
+      const historyScore = historyTerms ? scoreRecord(historyTerms, recordTerms) : 0;
+      const totalScore = queryScore * 3 + historyScore;
+      return { row, score: totalScore };
     })
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score)
@@ -330,6 +476,225 @@ function llmConfiguration() {
   };
 }
 
+const FACT_PATTERNS = [
+  // Preferences
+  /\b(?:i|my)\s+(?:strongly\s+|always\s+|personally\s+)?(?:prefer|preference\s+is)\b/i,
+  /\bi\s+(?:really\s+|always\s+)?(?:like|love|dislike|hate)\s+(?:to\s+)?[a-z]/i,
+  /\bmy\s+favorite\s+[a-z0-9_-]+\s+is\b/i,
+  /\bi\s+don'?t\s+like\s+[a-z]/i,
+
+  // Life situation, employment, location, education
+  /\bi\s+(?:currently\s+)?(?:work|intern)\s+(?:at|in|for|as)\b/i,
+  /\bi\s+am\s+(?:an?\s+)?(?:intern|engineer|developer|student|designer|manager|researcher)\s+(?:at|in|for)\b/i,
+  /\bi\s+(?:currently\s+)?live\s+in\b/i,
+  /\bi\s+(?:just\s+)?(?:moved|relocated)\s+to\b/i,
+  /\bi\s+(?:study|am\s+studying)\s+[a-z]/i,
+
+  // Routines & habits
+  /\bevery\s+(?:day|morning|evening|night|afternoon|weekend|weekday)\s+i\b/i,
+  /\bmy\s+(?:morning|evening|night|sleep|daily|work)\s+routine\s+is\b/i,
+  /\bi\s+(?:usually|always|typically)\s+(?:wake\s+up|sleep|exercise|meditate|read|work|run|go|eat|drink)\b/i,
+
+  // Goals
+  /\bmy\s+goal\s+is\s+to\b/i,
+  /\bi\s+am\s+(?:aiming|planning|hoping|training)\s+to\b/i,
+  /\bi\s+want\s+to\s+learn\s+[a-z]/i,
+];
+
+const DISQUALIFY_PATTERNS = [
+  /\bwhat\s+if\b/i,
+  /\bif\s+i\b/i,
+  /\bsuppose\b/i,
+  /\bimagining\b/i,
+  /\bimagine\b/i,
+  /\bhypothetically\b/i,
+  /\bfor\s+example\b/i,
+  /\bmaybe\s+i\s+should\b/i,
+  /\bcould\s+i\b/i,
+  /\bwould\s+it\s+be\b/i,
+  /\bdo\s+i\b/i,
+  /\bwhy\s+do\s+i\b/i,
+  /\bwhere\s+is\b/i,
+  /\bhow\s+do\s+i\b/i,
+  /\?$/,
+];
+
+function isDuplicateProposal(proposal, existingMemories) {
+  const propTerms = extractTerms(proposal).tokens;
+  if (propTerms.size === 0) return true;
+
+  for (const memory of existingMemories) {
+    const memTerms = extractTerms(memory).tokens;
+    let matchCount = 0;
+    for (const term of propTerms) {
+      if (memTerms.has(term)) matchCount++;
+    }
+    const overlapRatio = matchCount / Math.max(propTerms.size, 1);
+    if (overlapRatio >= 0.7) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function extractMemoryProposals(message, existingApprovedMemories = []) {
+  if (typeof message !== 'string' || message.trim().length === 0) return [];
+
+  // Split into sentences using punctuation boundaries (. ! ? \n)
+  const rawSentences = message
+    .split(/(?<=[.!?\n])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 8 && s.length <= 400);
+
+  const proposals = [];
+
+  for (const raw of rawSentences) {
+    // Check if the whole sentence or candidate fact is attributed to someone else
+    if (/\b(?:said|says|told\s+me|wrote|quoted|claimed)\s+["']/i.test(raw)) {
+      continue;
+    }
+
+    // Strip inline quotation blocks to prevent proposing quoted text that the user didn't endorse
+    const withoutQuotes = raw.replace(/["'][^"']+["']/g, '').trim();
+
+    // Must not match any disqualifying patterns (hypotheticals, questions, speculations)
+    const isDisqualified = DISQUALIFY_PATTERNS.some((pattern) => pattern.test(withoutQuotes) || pattern.test(raw));
+    if (isDisqualified) continue;
+
+    // Must match at least one candidate fact pattern
+    const isFact = FACT_PATTERNS.some((pattern) => pattern.test(withoutQuotes));
+    if (!isFact) continue;
+
+    // Normalize: capitalize first letter, ensure trailing period, clean spaces
+    let clean = raw.replace(/\s+/g, ' ').trim();
+    clean = clean.charAt(0).toUpperCase() + clean.slice(1);
+    if (!/[.!?]$/.test(clean)) clean += '.';
+
+    // Check for duplicates against existing approved memories
+    // If a statement contradicts an existing memory, it represents a conflicting update rather than a duplicate
+    const contradictsAny = existingApprovedMemories.some((mem) => findContradiction(clean, mem));
+    if (!contradictsAny && isDuplicateProposal(clean, existingApprovedMemories)) {
+      continue;
+    }
+
+    // Check for duplicates in current proposals list
+    if (isDuplicateProposal(clean, proposals)) {
+      continue;
+    }
+
+    proposals.push(clean);
+    if (proposals.length >= 2) break;
+  }
+
+  return proposals;
+}
+
+function findContradiction(textA, textB) {
+  if (typeof textA !== 'string' || typeof textB !== 'string') return null;
+  const a = textA.toLowerCase();
+  const b = textB.toLowerCase();
+
+  // 1. Mutually exclusive preference pairs (e.g. dark mode vs light mode, books vs ebooks, tea vs coffee)
+  const exclusivePairs = [
+    [['dark mode', 'dark theme'], ['light mode', 'light theme']],
+    [['physical books', 'paper books'], ['ebooks', 'e-books', 'kindle']],
+    [['coffee'], ['tea']],
+    [['vegetarian', 'vegan'], ['eat meat', 'carnivore', 'love steak', 'eats meat']],
+    [['mac', 'macos'], ['windows', 'linux']],
+    [['ios', 'iphone'], ['android']],
+  ];
+
+  for (const [group1, group2] of exclusivePairs) {
+    const aHasG1 = group1.some((k) => a.includes(k));
+    const aHasG2 = group2.some((k) => a.includes(k));
+    const bHasG1 = group1.some((k) => b.includes(k));
+    const bHasG2 = group2.some((k) => b.includes(k));
+
+    if ((aHasG1 && bHasG2) || (aHasG2 && bHasG1)) {
+      const prefMarkers = ['prefer', 'like', 'love', 'use', 'always', 'favorite', 'favourite', 'work on'];
+      const aPref = prefMarkers.some((m) => a.includes(m)) || aHasG1 || aHasG2;
+      const bPref = prefMarkers.some((m) => b.includes(m)) || bHasG1 || bHasG2;
+      if (aPref && bPref) {
+        return {
+          contradicts: true,
+          reason: `Opposing preference detected: "${group1[0]}" vs "${group2[0]}".`,
+        };
+      }
+    }
+  }
+
+  // 2. Conflicting employer: "work at/for X" or "intern at/for X"
+  const employerRegex = /\b(?:work|working|intern|interning|employed)\s+(?:at|for)\s+([A-Za-z0-9_-]+)/i;
+  const matchEmpA = employerRegex.exec(textA);
+  const matchEmpB = employerRegex.exec(textB);
+  if (matchEmpA && matchEmpB) {
+    const empA = matchEmpA[1].trim().toLowerCase();
+    const empB = matchEmpB[1].trim().toLowerCase();
+    if (empA !== empB && empA.length > 1 && empB.length > 1) {
+      return {
+        contradicts: true,
+        reason: `Conflicting employer: "${matchEmpA[1]}" vs "${matchEmpB[1]}".`,
+      };
+    }
+  }
+
+  // 3. Conflicting location: "live in X" / "work in X" / "stay in X" / "based in X"
+  const locationRegex = /\b(?:live|living|reside|residing|stay|staying|based|work|working|intern|interning)\s+in\s+([A-Za-z]+)/i;
+  const matchLocA = locationRegex.exec(textA);
+  const matchLocB = locationRegex.exec(textB);
+  if (matchLocA && matchLocB) {
+    const locA = matchLocA[1].trim().toLowerCase();
+    const locB = matchLocB[1].trim().toLowerCase();
+    if (locA !== locB && locA.length > 2 && locB.length > 2) {
+      return {
+        contradicts: true,
+        reason: `Conflicting location: "${matchLocA[1]}" vs "${matchLocB[1]}".`,
+      };
+    }
+  }
+
+  // 4. Polarity conflict on same subject: like/love X vs dislike/hate/avoid X
+  const positiveMarker = /\b(?:prefer|love|enjoy|like|always)\s+([A-Za-z]+)/i;
+  const negativeMarker = /\b(?:dislike|hate|avoid|never|cannot\s+stand|can't\s+stand|do\s+not\s+like|don't\s+like)\s+([A-Za-z]+)/i;
+
+  const posA = positiveMarker.exec(textA);
+  const negB = negativeMarker.exec(textB);
+  if (posA && negB && posA[1].toLowerCase() === negB[1].toLowerCase()) {
+    return {
+      contradicts: true,
+      reason: `Opposing attitude towards "${posA[1]}": preference vs dislike.`,
+    };
+  }
+
+  const negA = negativeMarker.exec(textA);
+  const posB = positiveMarker.exec(textB);
+  if (negA && posB && negA[1].toLowerCase() === posB[1].toLowerCase()) {
+    return {
+      contradicts: true,
+      reason: `Opposing attitude towards "${negA[1]}": dislike vs preference.`,
+    };
+  }
+
+  return null;
+}
+
+function findMemoryContradictions(memories) {
+  const contradictions = [];
+  for (let i = 0; i < memories.length; i++) {
+    for (let j = i + 1; j < memories.length; j++) {
+      const conflict = findContradiction(memories[i].text, memories[j].text);
+      if (conflict) {
+        contradictions.push({
+          memoryA: memories[i],
+          memoryB: memories[j],
+          reason: conflict.reason,
+        });
+      }
+    }
+  }
+  return contradictions;
+}
+
 async function handleChat(body) {
   if (
     !isObject(body) ||
@@ -341,27 +706,51 @@ async function handleChat(body) {
     throw new HttpError(400, 'Message must contain 1 to 8000 characters.');
   }
 
+  const approvedRows = database.prepare("SELECT id, text, created_at, updated_at, status FROM memories WHERE status = 'approved'").all();
+  const existingApprovedMemories = approvedRows.map((r) => r.text);
+  const proposals = extractMemoryProposals(body.message, existingApprovedMemories);
+
+  const conflicts = [];
+  for (const prop of proposals) {
+    for (const memRow of approvedRows) {
+      const conflict = findContradiction(prop, memRow.text);
+      if (conflict) {
+        conflicts.push({
+          proposal: prop,
+          existingMemoryId: memRow.id,
+          existingMemory: memRow.text,
+          reason: conflict.reason,
+        });
+      }
+    }
+  }
+
   const settings = database.prepare('SELECT allow_external_ai FROM app_settings WHERE id = 1').get();
   const config = llmConfiguration();
-  if (!settings?.allow_external_ai || !body.allowExternalAI || !config.configured) return { mode: 'demo' };
+  if (!settings?.allow_external_ai || !body.allowExternalAI || !config.configured) {
+    return { mode: 'demo', proposals, conflicts };
+  }
 
-  const memories = relevantRecords('memories', body.message, ['text'], 5, "status = 'approved'")
+  const history = Array.isArray(body.history)
+    ? body.history.slice(-8).filter(
+        (item) => isObject(item) && roles.has(item.role) && isText(item.text) && item.text.length <= 8000,
+      )
+    : [];
+
+  const memories = relevantRecords('memories', body.message, ['text'], 5, "status = 'approved'", history)
     .map((item) => item.text);
   const decisions = relevantRecords(
     'decisions',
     body.message,
     ['title', 'context', 'reasoning', 'actual_outcome', 'lesson'],
     3,
+    '',
+    history,
   ).map((item) => ({
     title: item.title,
     recordedContext: item.context,
     recordedReasoning: item.reasoning,
   }));
-  const history = Array.isArray(body.history)
-    ? body.history.slice(-8).filter(
-        (item) => isObject(item) && roles.has(item.role) && isText(item.text) && item.text.length <= 8000,
-      )
-    : [];
   const messages = [
     {
       role: 'system',
@@ -420,7 +809,7 @@ async function handleChat(body) {
   if (typeof text !== 'string' || !text.trim()) {
     throw new HttpError(502, 'AI provider response did not contain a message.');
   }
-  return { mode: 'ai', text: text.trim() };
+  return { mode: 'ai', text: text.trim(), proposals, conflicts };
 }
 
 async function readJson(request) {
@@ -472,7 +861,7 @@ const server = createServer(async (request, response) => {
           model: config.configured ? config.model : null,
           mode: config.configured && enabled ? 'ai' : 'demo',
         },
-        scheduledJobs: false,
+        scheduledJobs: scheduledJobsActive,
       });
     }
 
@@ -540,6 +929,14 @@ const server = createServer(async (request, response) => {
         'SELECT id, text, created_at, updated_at, status FROM memories ORDER BY rowid DESC',
       ).all();
       return respond(response, 200, { memories: rows.map(mapMemoryRow) });
+    }
+
+    // GET /api/memories/contradictions — list contradictions among approved memories
+    if (url.pathname === '/api/memories/contradictions' && request.method === 'GET') {
+      const rows = database.prepare(
+        "SELECT id, text, created_at, updated_at, status FROM memories WHERE status = 'approved' ORDER BY rowid DESC",
+      ).all();
+      return respond(response, 200, { contradictions: findMemoryContradictions(rows.map(mapMemoryRow)) });
     }
 
     // Routes that operate on a specific memory ID
@@ -631,14 +1028,61 @@ server.on('error', (error) => {
   process.exitCode = 1;
 });
 
+let schedulerTimer = null;
+let scheduledJobsActive = false;
+
+function runAutomaticSleepCycleReview() {
+  try {
+    const latestRun = database.prepare('SELECT started_at FROM sleep_runs ORDER BY started_at DESC LIMIT 1').get();
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    if (!latestRun || latestRun.started_at < twentyFourHoursAgo) {
+      const now = new Date();
+      const startedAt = now.toISOString();
+      const key = `auto-sleep-cycle-${startedAt.slice(0, 10)}`;
+      const existing = database.prepare('SELECT id FROM sleep_runs WHERE idempotency_key = ?').get(key);
+      if (!existing) {
+        const staleMemoryIds = database.prepare(
+          "SELECT id FROM memories WHERE status = 'approved' AND updated_at < ? ORDER BY updated_at",
+        ).all(new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString()).map((row) => row.id);
+        const id = crypto.randomUUID();
+        database.prepare(
+          `INSERT INTO sleep_runs (id, idempotency_key, started_at, status, stale_memory_ids)
+            VALUES (?, ?, ?, 'completed', ?)`,
+        ).run(id, key, startedAt, JSON.stringify(staleMemoryIds));
+      }
+    }
+  } catch (err) {
+    console.error('Automated Sleep Cycle run encountered an issue:', err);
+  }
+}
+
+function startSleepCycleScheduler() {
+  scheduledJobsActive = true;
+  runAutomaticSleepCycleReview();
+  schedulerTimer = setInterval(runAutomaticSleepCycleReview, 60 * 60 * 1000);
+  schedulerTimer.unref();
+}
+
+function stopSleepCycleScheduler() {
+  if (schedulerTimer) {
+    clearInterval(schedulerTimer);
+    schedulerTimer = null;
+  }
+  scheduledJobsActive = false;
+}
+
+startSleepCycleScheduler();
+
 server.listen(port, '127.0.0.1', () => {
   console.log(`Somnia backend listening at http://127.0.0.1:${port}`);
   console.log(`SQLite database: ${databasePath}`);
   const config = llmConfiguration();
   console.log(`LLM provider: ${config.configured ? `configured (${config.model})` : 'not configured; demo mode'}`);
+  console.log('Automated Sleep Cycle scheduler: active');
 });
 
 function shutdown() {
+  stopSleepCycleScheduler();
   server.close(() => {
     database.close();
     process.exit(0);
