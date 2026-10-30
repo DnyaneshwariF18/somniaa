@@ -290,3 +290,411 @@ test('memory CRUD endpoints work correctly', async () => {
   assert.equal(deleteAgain.status, 404, 'deleting a non-existent memory returns 404');
 });
 
+test('retrieval supports paraphrased queries, word variations, follow-up conversation history, and excludes archived memories', async () => {
+  // Populate database with controlled dataset
+  const testData = {
+    version: 1,
+    messages: [],
+    memories: [
+      {
+        id: 'mem-internship',
+        text: 'I work in Pune as an intern at Google.',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'approved',
+      },
+      {
+        id: 'mem-study',
+        text: 'User study preference is concise notes.',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'approved',
+      },
+      {
+        id: 'mem-archived-internship',
+        text: 'Confidential archived internship details in London should stay secret.',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'archived',
+      },
+      {
+        id: 'mem-archived-study',
+        text: 'Archived obsolete studying habit of flashcards.',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'archived',
+      },
+    ],
+    reminders: [],
+    decisions: [
+      {
+        id: 'dec-1',
+        title: 'Adopted TypeScript for backend services',
+        context: 'Evaluating JavaScript vs TypeScript for maintainability',
+        options: '["JavaScript", "TypeScript"]',
+        reasoning: 'Better static guarantees and developer experience',
+        expectedOutcome: 'Fewer runtime errors',
+        reviewDate: '2026-12-31',
+        actualOutcome: 'Fewer bugs during integration',
+        lesson: 'Type safety is worth the build step',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ],
+    sleepRuns: [],
+    theme: 'somnia',
+    allowExternalAI: true,
+  };
+
+  const setupResponse = await fetch(`${backendUrl}/api/data`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(testData),
+  });
+  assert.equal(setupResponse.status, 200);
+
+  // ── 1. Paraphrased query: "Where is my internship?" ──────────────────────
+  // Should match "I work in Pune as an intern at Google" despite wording differences
+  capturedRequests = [];
+  const paraphraseResponse = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'Where is my internship?',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(paraphraseResponse.status, 200);
+  assert.equal(capturedRequests.length, 1);
+  const paraphraseContext = JSON.stringify(capturedRequests[0].body.messages);
+  assert.match(paraphraseContext, /I work in Pune as an intern at Google/);
+  assert.doesNotMatch(paraphraseContext, /Confidential archived internship/);
+
+  // ── 2. Word variations & stemming: "studying routines and preferences" ────
+  capturedRequests = [];
+  const variationResponse = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'Tell me about my studying routines and preferences.',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(variationResponse.status, 200);
+  assert.equal(capturedRequests.length, 1);
+  const variationContext = JSON.stringify(capturedRequests[0].body.messages);
+  assert.match(variationContext, /User study preference is concise notes/);
+  assert.doesNotMatch(variationContext, /Archived obsolete studying habit/);
+
+  // ── 3. Follow-up query using conversation history ────────────────────────
+  // Query "What city is that in?" has no direct "intern" or "Google",
+  // but history provides conversational context
+  capturedRequests = [];
+  const followUpResponse = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'What city is that in?',
+      history: [
+        { role: 'user', text: 'Tell me about my internship at Google' },
+        { role: 'somnia', text: 'You work in Pune as an intern at Google.' },
+      ],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(followUpResponse.status, 200);
+  assert.equal(capturedRequests.length, 1);
+  const followUpContext = JSON.stringify(capturedRequests[0].body.messages);
+  assert.match(followUpContext, /I work in Pune as an intern at Google/);
+
+  // ── 4. Archived memories must NEVER enter AI prompt ───────────────────────
+  capturedRequests = [];
+  const archivedQueryResponse = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'Tell me about London or flashcards.',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(archivedQueryResponse.status, 200);
+  assert.equal(capturedRequests.length, 1);
+  const systemPrompt = capturedRequests[0].body.messages.find((m) => m.role === 'system')?.content ?? '';
+  assert.doesNotMatch(systemPrompt, /London/);
+  assert.doesNotMatch(systemPrompt, /flashcards/);
+  assert.doesNotMatch(systemPrompt, /Confidential archived internship/);
+  assert.doesNotMatch(systemPrompt, /Archived obsolete/);
+  assert.doesNotMatch(systemPrompt, /Relevant approved memories/);
+
+  // ── 5. Follow-up with decision context ───────────────────────────────────
+  capturedRequests = [];
+  const decisionQueryResponse = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'Why did we choose that language?',
+      history: [
+        { role: 'user', text: 'Did we make any decision regarding TypeScript backend?' },
+        { role: 'somnia', text: 'Yes, you chose TypeScript over Python for maintainability.' },
+      ],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(decisionQueryResponse.status, 200);
+  assert.equal(capturedRequests.length, 1);
+  const decisionContext = JSON.stringify(capturedRequests[0].body.messages);
+  assert.match(decisionContext, /Adopted TypeScript for backend services/);
+});
+
+test('memory proposal extraction: detects explicit facts, rejects hypotheticals, handles duplicates, respects consent gating, and supports approval', async () => {
+  // 1. Setup baseline data
+  const data = {
+    version: 1,
+    messages: [],
+    memories: [
+      {
+        id: 'existing-work-mem',
+        text: 'I work in Pune as an intern at Google.',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'approved',
+      },
+    ],
+    reminders: [],
+    decisions: [],
+    sleepRuns: [],
+    theme: 'somnia',
+    allowExternalAI: true,
+  };
+  await fetch(`${backendUrl}/api/data`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+  // 2. Proposal Creation: Explicit preference stated by user
+  const prefRes = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'I prefer reading physical books rather than ebooks.',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(prefRes.status, 200);
+  const prefJson = await prefRes.json();
+  assert.equal(prefJson.mode, 'ai');
+  assert.ok(Array.isArray(prefJson.proposals), 'proposals is an array');
+  assert.equal(prefJson.proposals.length, 1);
+  assert.match(prefJson.proposals[0], /I prefer reading physical books rather than ebooks/i);
+
+  // 3. Rejects Hypotheticals, Questions, and Quoted text
+  // 3a. Hypothetical "what if" question
+  const hypoRes = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'What if I prefer tea over coffee?',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  const hypoJson = await hypoRes.json();
+  assert.deepEqual(hypoJson.proposals, [], 'hypothetical questions must not generate proposals');
+
+  // 3b. Speculation / condition "Suppose I work at Microsoft"
+  const supposeRes = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'Suppose I work at Microsoft as a designer.',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  const supposeJson = await supposeRes.json();
+  assert.deepEqual(supposeJson.proposals, [], 'supposition must not generate proposals');
+
+  // 3c. Quoted text attributed to someone else
+  const quoteRes = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'My manager said "I like working late at night".',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  const quoteJson = await quoteRes.json();
+  assert.deepEqual(quoteJson.proposals, [], 'quoted statements by others must not generate proposals');
+
+  // 4. Duplicate Handling: Does not propose facts that already exist in approved memories
+  const dupRes = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'I work in Pune as an intern at Google.',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  const dupJson = await dupRes.json();
+  assert.deepEqual(dupJson.proposals, [], 'existing approved memories must not be proposed again');
+
+  // 5. Consent-Disabled Behavior: Runs local fallback extractor with zero external AI calls
+  capturedRequests = [];
+  const noConsentRes = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'Every morning I wake up at 6 AM to meditate.',
+      history: [],
+      allowExternalAI: false,
+    }),
+  });
+  assert.equal(noConsentRes.status, 200);
+  const noConsentJson = await noConsentRes.json();
+  assert.equal(noConsentJson.mode, 'demo');
+  assert.equal(capturedRequests.length, 0, 'must not send any request to external AI provider when consent is false');
+  assert.ok(Array.isArray(noConsentJson.proposals));
+  assert.equal(noConsentJson.proposals.length, 1);
+  assert.match(noConsentJson.proposals[0], /Every morning I wake up at 6 AM/i);
+
+  // 6. Approval Workflow: Approved proposal is saved via POST /api/memories and enters memory context
+  const proposalToApprove = prefJson.proposals[0];
+  const createRes = await fetch(`${backendUrl}/api/memories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: proposalToApprove }),
+  });
+  assert.equal(createRes.status, 201);
+  const createdMemory = await createRes.json();
+  assert.equal(createdMemory.status, 'approved');
+  assert.equal(createdMemory.text, proposalToApprove);
+
+  // 7. Verify the newly approved memory is now retrievable in subsequent chat
+  capturedRequests = [];
+  await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'Do I prefer ebooks or physical books?',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(capturedRequests.length, 1);
+  const messagesContext = JSON.stringify(capturedRequests[0].body.messages);
+  assert.match(messagesContext, /I prefer reading physical books rather than ebooks/);
+});
+
+test('automatic Sleep Cycle scheduler and contradiction detection work correctly', async () => {
+  // 1. Verify health endpoint reports scheduledJobs: true
+  const healthRes = await fetch(`${backendUrl}/api/health`);
+  assert.equal(healthRes.status, 200);
+  const health = await healthRes.json();
+  assert.equal(health.backend, 'ok');
+  assert.equal(health.scheduledJobs, true, 'Health check must report scheduledJobs: true when scheduler is active');
+
+  // 2. Setup memories with known facts
+  const data = {
+    version: 1,
+    messages: [],
+    memories: [
+      {
+        id: 'mem-work-pune',
+        text: 'I work in Pune as an intern at Google.',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'approved',
+      },
+      {
+        id: 'mem-pref-dark',
+        text: 'I prefer dark mode in all apps.',
+        createdAt: '2026-01-02T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        status: 'approved',
+      },
+    ],
+    reminders: [],
+    decisions: [],
+    sleepRuns: [],
+    theme: 'somnia',
+    allowExternalAI: true,
+  };
+  await fetch(`${backendUrl}/api/data`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+  // 3. Test incoming proposal with conflicting preference (light mode vs dark mode)
+  const conflictChatRes = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'I prefer light mode in all apps now.',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(conflictChatRes.status, 200);
+  const conflictJson = await conflictChatRes.json();
+  assert.ok(Array.isArray(conflictJson.proposals), 'proposals must be an array');
+  assert.equal(conflictJson.proposals.length, 1);
+  assert.ok(Array.isArray(conflictJson.conflicts), 'conflicts must be an array');
+  assert.equal(conflictJson.conflicts.length, 1);
+  assert.equal(conflictJson.conflicts[0].existingMemoryId, 'mem-pref-dark');
+  assert.match(conflictJson.conflicts[0].reason, /Opposing preference detected/i);
+
+  // 4. Test incoming proposal with conflicting employer and location
+  const conflictWorkRes = await fetch(`${backendUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'I work in London as an intern at Microsoft.',
+      history: [],
+      allowExternalAI: true,
+    }),
+  });
+  assert.equal(conflictWorkRes.status, 200);
+  const conflictWorkJson = await conflictWorkRes.json();
+  assert.ok(Array.isArray(conflictWorkJson.conflicts));
+  assert.ok(conflictWorkJson.conflicts.length >= 1);
+  assert.equal(conflictWorkJson.conflicts[0].existingMemoryId, 'mem-work-pune');
+
+  // 5. Test GET /api/memories/contradictions endpoint
+  // Add a conflicting memory directly to approved memories
+  await fetch(`${backendUrl}/api/memories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'I prefer light theme on all devices.' }),
+  });
+
+  const getContradictionsRes = await fetch(`${backendUrl}/api/memories/contradictions`);
+  assert.equal(getContradictionsRes.status, 200);
+  const contradictionsData = await getContradictionsRes.json();
+  assert.ok(Array.isArray(contradictionsData.contradictions));
+  assert.equal(contradictionsData.contradictions.length, 1);
+  assert.match(contradictionsData.contradictions[0].reason, /Opposing preference/i);
+
+  // 6. Resolve contradiction by editing/archiving one memory
+  const memoryToArchive = contradictionsData.contradictions[0].memoryB;
+  const archiveRes = await fetch(`${backendUrl}/api/memories/${encodeURIComponent(memoryToArchive.id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'archived' }),
+  });
+  assert.equal(archiveRes.status, 200);
+  const archived = await archiveRes.json();
+  assert.equal(archived.status, 'archived');
+
+  // Verify contradictions is now empty
+  const afterArchiveRes = await fetch(`${backendUrl}/api/memories/contradictions`);
+  const afterArchiveData = await afterArchiveRes.json();
+  assert.deepEqual(afterArchiveData.contradictions, []);
+});

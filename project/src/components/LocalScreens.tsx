@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Download, Plus, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, Archive, Bell, Check, Download, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import PageHeader from '@/components/PageHeader';
 import { createLocalId, exportLocalData } from '@/localData';
 import type {
@@ -9,7 +9,16 @@ import type {
   LocalReminder,
 } from '@/localData';
 import { THEMES } from '@/themes';
-import type { ApiStatus } from '@/api';
+import {
+  approveMemory,
+  createMemory,
+  deleteMemory,
+  editMemory as apiEditMemory,
+  getMemoryContradictions,
+  listMemories,
+  type ApiStatus,
+  type MemoryContradictionItem,
+} from '@/api';
 
 interface ScreenProps {
   data: LocalData;
@@ -101,6 +110,33 @@ function toLocalDateTimeValue(value: string) {
 export function MemoriesScreen({ data, update, storageError }: ScreenProps) {
   const [text, setText] = useState('');
   const [search, setSearch] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Sync latest memories from backend if available
+  useEffect(() => {
+    let active = true;
+    void listMemories()
+      .then((memories) => {
+        if (active && Array.isArray(memories) && memories.length > 0) {
+          update((previous) => {
+            const prevIds = previous.memories.map((m) => m.id).join(',');
+            const nextIds = memories.map((m) => m.id).join(',');
+            if (prevIds !== nextIds || JSON.stringify(previous.memories) !== JSON.stringify(memories)) {
+              return { ...previous, memories };
+            }
+            return previous;
+          });
+        }
+      })
+      .catch(() => {
+        // Keep existing cached memories if backend is unavailable
+      });
+    return () => {
+      active = false;
+    };
+  }, [update]);
+
   const visible = useMemo(
     () =>
       data.memories.filter((memory) =>
@@ -109,34 +145,115 @@ export function MemoriesScreen({ data, update, storageError }: ScreenProps) {
     [data.memories, search],
   );
 
-  const addMemory = (event: React.FormEvent<HTMLFormElement>) => {
+  const addMemory = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const now = new Date().toISOString();
-    const memory: LocalMemory = {
-      id: createLocalId(),
-      text: text.trim(),
-      createdAt: now,
-      updatedAt: now,
-      status: 'approved',
-    };
-    update((previous) => ({ ...previous, memories: [memory, ...previous.memories] }));
-    setText('');
+    const trimmed = text.trim();
+    if (!trimmed || saving) return;
+    setSaving(true);
+    setActionError(null);
+    try {
+      const created = await createMemory(trimmed);
+      update((previous) => ({
+        ...previous,
+        memories: [created, ...previous.memories.filter((m) => m.id !== created.id)],
+      }));
+      setText('');
+    } catch (err) {
+      // Fallback to local creation for offline resilience
+      const now = new Date().toISOString();
+      const memory: LocalMemory = {
+        id: createLocalId(),
+        text: trimmed,
+        createdAt: now,
+        updatedAt: now,
+        status: 'approved',
+      };
+      update((previous) => ({ ...previous, memories: [memory, ...previous.memories] }));
+      setText('');
+      if (err instanceof Error && !err.message.includes('unavailable')) {
+        setActionError(err.message);
+      }
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const editMemory = (memory: LocalMemory) => {
+  const editMemory = async (memory: LocalMemory) => {
     const value = window.prompt('Edit this memory:', memory.text);
     if (value === null || !value.trim()) return;
-    update((previous) => ({
-      ...previous,
-      memories: previous.memories.map((item) =>
-        item.id === memory.id
-          ? { ...item, text: value.trim(), updatedAt: new Date().toISOString() }
-          : item,
-      ),
-    }));
+    const trimmed = value.trim();
+    setActionError(null);
+    try {
+      const updated = await apiEditMemory(memory.id, { text: trimmed });
+      update((previous) => ({
+        ...previous,
+        memories: previous.memories.map((item) =>
+          item.id === memory.id ? updated : item,
+        ),
+      }));
+    } catch {
+      update((previous) => ({
+        ...previous,
+        memories: previous.memories.map((item) =>
+          item.id === memory.id
+            ? { ...item, text: trimmed, updatedAt: new Date().toISOString() }
+            : item,
+        ),
+      }));
+    }
   };
 
-  const removeMemory = (id: string) => {
+  const handleApprove = async (memory: LocalMemory) => {
+    setActionError(null);
+    try {
+      const updated = await approveMemory(memory.id);
+      update((previous) => ({
+        ...previous,
+        memories: previous.memories.map((item) =>
+          item.id === memory.id ? updated : item,
+        ),
+      }));
+    } catch {
+      update((previous) => ({
+        ...previous,
+        memories: previous.memories.map((item) =>
+          item.id === memory.id
+            ? { ...item, status: 'approved', updatedAt: new Date().toISOString() }
+            : item,
+        ),
+      }));
+    }
+  };
+
+  const handleArchive = async (memory: LocalMemory) => {
+    setActionError(null);
+    try {
+      const updated = await apiEditMemory(memory.id, { status: 'archived' });
+      update((previous) => ({
+        ...previous,
+        memories: previous.memories.map((item) =>
+          item.id === memory.id ? updated : item,
+        ),
+      }));
+    } catch {
+      update((previous) => ({
+        ...previous,
+        memories: previous.memories.map((item) =>
+          item.id === memory.id
+            ? { ...item, status: 'archived', updatedAt: new Date().toISOString() }
+            : item,
+        ),
+      }));
+    }
+  };
+
+  const removeMemory = async (id: string) => {
+    setActionError(null);
+    try {
+      await deleteMemory(id);
+    } catch {
+      // Continue with local removal
+    }
     update((previous) => ({
       ...previous,
       memories: previous.memories.filter((item) => item.id !== id),
@@ -146,13 +263,15 @@ export function MemoriesScreen({ data, update, storageError }: ScreenProps) {
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title="Memories" subtitle="Things you chose to save on this device." />
-      <StorageNotice error={storageError} />
+      <StorageNotice error={storageError ?? actionError} />
       <Card>
         <form onSubmit={addMemory} className="flex flex-col gap-4">
           <Field label="Add a memory" value={text} onChange={setText} multiline required />
           <div className="flex justify-end">
-            <PrimaryButton type="submit" disabled={!text.trim()}>
-              <span className="inline-flex items-center gap-2"><Plus size={16} /> Save memory</span>
+            <PrimaryButton type="submit" disabled={!text.trim() || saving}>
+              <span className="inline-flex items-center gap-2">
+                <Plus size={16} /> {saving ? 'Saving...' : 'Save memory'}
+              </span>
             </PrimaryButton>
           </div>
         </form>
@@ -168,12 +287,40 @@ export function MemoriesScreen({ data, update, storageError }: ScreenProps) {
         <div className="flex flex-col gap-3">
           {visible.map((memory) => (
             <Card key={memory.id}>
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-white/90">{memory.text}</p>
+              <div className="flex items-start justify-between gap-3">
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-white/90">{memory.text}</p>
+                <span
+                  className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-medium tracking-wide ${
+                    memory.status === 'approved'
+                      ? 'border border-emerald-500/30 bg-emerald-500/15 text-emerald-300'
+                      : 'border border-amber-500/30 bg-amber-500/15 text-amber-300'
+                  }`}
+                >
+                  {memory.status === 'approved' ? 'Approved' : 'Archived'}
+                </span>
+              </div>
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                 <span className="text-xs" style={{ color: 'var(--text-faint)' }}>
                   Added {formatDate(memory.createdAt)} · User-provided
                 </span>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {memory.status === 'archived' ? (
+                    <button
+                      className="glass inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs text-emerald-300 hover:text-emerald-200"
+                      onClick={() => handleApprove(memory)}
+                      title="Approve memory for chat context"
+                    >
+                      <Check size={13} /> Approve
+                    </button>
+                  ) : (
+                    <button
+                      className="glass inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs text-amber-300 hover:text-amber-200"
+                      onClick={() => handleArchive(memory)}
+                      title="Archive memory to exclude from chat context"
+                    >
+                      <Archive size={13} /> Archive
+                    </button>
+                  )}
                   <button className="glass rounded-full px-3 py-1.5 text-xs" onClick={() => editMemory(memory)}>
                     Edit
                   </button>
@@ -199,6 +346,22 @@ export function RemindersScreen({ data, update, storageError }: ScreenProps) {
   const [dueAt, setDueAt] = useState('');
   const [filter, setFilter] = useState<'upcoming' | 'completed'>('upcoming');
   const [editId, setEditId] = useState<string | null>(null);
+  const [notifPerm, setNotifPerm] = useState<NotificationPermission | 'unsupported'>('default');
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setNotifPerm(Notification.permission);
+    } else {
+      setNotifPerm('unsupported');
+    }
+  }, []);
+
+  const requestNotifPermission = async () => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      const perm = await Notification.requestPermission();
+      setNotifPerm(perm);
+    }
+  };
 
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -238,6 +401,28 @@ export function RemindersScreen({ data, update, storageError }: ScreenProps) {
     <div className="flex flex-col gap-6">
       <PageHeader title="Reminders" subtitle="Saved to this device; no cloud account needed." />
       <StorageNotice error={storageError} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs">
+        <div className="flex items-center gap-2 text-white/80">
+          <Bell size={15} className="text-[color:var(--accent)]" />
+          <span>
+            {notifPerm === 'granted'
+              ? 'Desktop notifications are active for this browser.'
+              : notifPerm === 'denied'
+                ? 'Desktop notifications are blocked in browser settings.'
+                : 'Enable desktop notifications to receive alerts when reminders become due.'}
+          </span>
+        </div>
+        {notifPerm === 'default' && (
+          <button
+            onClick={() => void requestNotifPermission()}
+            className="glass rounded-full px-3 py-1.5 font-medium text-white hover:text-white"
+          >
+            Enable Notifications
+          </button>
+        )}
+      </div>
+
       <Card>
         <form onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
           <Field label="Title" value={title} onChange={setTitle} required />
@@ -281,62 +466,74 @@ export function RemindersScreen({ data, update, storageError }: ScreenProps) {
         <Card><p className="text-sm" style={{ color: 'var(--text-muted)' }}>No {filter} reminders.</p></Card>
       ) : (
         <div className="flex flex-col gap-3">
-          {visible.map((reminder) => (
-            <Card key={reminder.id}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 className="font-medium text-white">{reminder.title}</h2>
-                  <p className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>{formatDate(reminder.dueAt)}</p>
-                  {reminder.details && <p className="mt-3 whitespace-pre-wrap text-sm text-white/80">{reminder.details}</p>}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {!reminder.completedAt && (
-                    <>
-                      <button className="glass rounded-full px-3 py-1.5 text-xs" onClick={() => startEdit(reminder)}>Edit</button>
+          {visible.map((reminder) => {
+            const isOverdue = !reminder.completedAt && Date.parse(reminder.dueAt) < Date.now();
+            return (
+              <Card key={reminder.id}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="font-medium text-white">{reminder.title}</h2>
+                      {isOverdue && (
+                        <span className="rounded-full bg-rose-500/20 border border-rose-500/30 px-2 py-0.5 text-[10px] font-semibold text-rose-300">
+                          Overdue
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-xs" style={{ color: isOverdue ? '#fca5a5' : 'var(--text-muted)' }}>
+                      {formatDate(reminder.dueAt)}
+                    </p>
+                    {reminder.details && <p className="mt-3 whitespace-pre-wrap text-sm text-white/80">{reminder.details}</p>}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {!reminder.completedAt && (
+                      <>
+                        <button className="glass rounded-full px-3 py-1.5 text-xs" onClick={() => startEdit(reminder)}>Edit</button>
+                        <button
+                          className="glass rounded-full px-3 py-1.5 text-xs text-emerald-300 hover:text-emerald-200"
+                          onClick={() => update((previous) => ({
+                            ...previous,
+                            reminders: previous.reminders.map((item) =>
+                              item.id === reminder.id ? { ...item, completedAt: new Date().toISOString() } : item,
+                            ),
+                          }))}
+                        >
+                          Complete
+                        </button>
+                      </>
+                    )}
+                    {reminder.completedAt && (
                       <button
                         className="glass rounded-full px-3 py-1.5 text-xs"
                         onClick={() => update((previous) => ({
                           ...previous,
                           reminders: previous.reminders.map((item) =>
-                            item.id === reminder.id ? { ...item, completedAt: new Date().toISOString() } : item,
+                            item.id === reminder.id ? { ...item, completedAt: null } : item,
                           ),
                         }))}
                       >
-                        Complete
+                        Reopen
                       </button>
-                    </>
-                  )}
-                  {reminder.completedAt && (
+                    )}
                     <button
-                      className="glass rounded-full px-3 py-1.5 text-xs"
+                      aria-label={`Delete ${reminder.title}`}
+                      className="glass rounded-full px-3 py-1.5 text-xs text-rose-200"
                       onClick={() => update((previous) => ({
                         ...previous,
-                        reminders: previous.reminders.map((item) =>
-                          item.id === reminder.id ? { ...item, completedAt: null } : item,
-                        ),
+                        reminders: previous.reminders.filter((item) => item.id !== reminder.id),
                       }))}
                     >
-                      Reopen
+                      Delete
                     </button>
-                  )}
-                  <button
-                    aria-label={`Delete ${reminder.title}`}
-                    className="glass rounded-full px-3 py-1.5 text-xs text-rose-200"
-                    onClick={() => update((previous) => ({
-                      ...previous,
-                      reminders: previous.reminders.filter((item) => item.id !== reminder.id),
-                    }))}
-                  >
-                    Delete
-                  </button>
+                  </div>
                 </div>
-              </div>
-            </Card>
-          ))}
+              </Card>
+            );
+          })}
         </div>
       )}
       <p className="text-xs" style={{ color: 'var(--text-faint)' }}>
-        Reminders are not sent as notifications. This app cannot reliably alert you when it is closed.
+        Reminders trigger in-app alerts and desktop notifications while this browser tab is active.
       </p>
     </div>
   );
@@ -548,14 +745,14 @@ export function SettingsScreen({
           </span>
         </label>
         <p className="mt-4 text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-          Reminders are stored but no notifications are sent; Somnia cannot alert you while it is closed. Scheduled Sleep Cycle jobs are not configured.
+          Reminders trigger in-app alerts and desktop notifications while this browser tab is active. Automated Sleep Cycle runs daily on the backend to review memory freshness.
         </p>
       </Card>
     </div>
   );
 }
 
-export function SleepCycleScreen({ data, storageError, runSleepCycle }: ScreenProps) {
+export function SleepCycleScreen({ data, storageError, apiStatus, runSleepCycle }: ScreenProps) {
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const latest = data.sleepRuns[0];
@@ -578,10 +775,34 @@ export function SleepCycleScreen({ data, storageError, runSleepCycle }: ScreenPr
     <div className="flex flex-col gap-6">
       <PageHeader title="Sleep Cycle" subtitle="A backend job reviews approved memories for staleness." />
       <StorageNotice error={storageError} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+        <div className="flex items-center gap-2.5 text-xs">
+          <span className="relative flex h-2.5 w-2.5">
+            {apiStatus?.scheduledJobs && (
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+            )}
+            <span
+              className={`relative inline-flex h-2.5 w-2.5 rounded-full ${
+                apiStatus?.scheduledJobs ? 'bg-emerald-400' : 'bg-zinc-500'
+              }`}
+            />
+          </span>
+          <span className="font-medium text-white/90">
+            {apiStatus?.scheduledJobs
+              ? 'Automatic Background Scheduler: Active (Daily 24h review)'
+              : 'Automatic Background Scheduler: Inactive'}
+          </span>
+        </div>
+        <span className="text-[11px] text-white/60">
+          Backend SQLite Job
+        </span>
+      </div>
+
       <Card>
         <p className="text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-          This manual backend run flags approved memories not updated in over 180 days. It does not infer new facts or run automatically.
-          Repeating the same request is safe; scheduled runs are not configured.
+          This backend job flags approved memories not updated in over 180 days. Repeating the request is safe due to idempotency keys.
+          The automated scheduler periodically checks in the background.
         </p>
         {runError && <p className="mt-3 text-sm text-rose-200" role="alert">{runError}</p>}
         <PrimaryButton className="mt-4" onClick={() => void run()} disabled={isRunning}>
@@ -617,32 +838,133 @@ export function SleepCycleScreen({ data, storageError, runSleepCycle }: ScreenPr
   );
 }
 
-export function MorningReportScreen({ data, storageError }: ScreenProps) {
+export function MorningReportScreen({ data, update, storageError, apiStatus }: ScreenProps) {
+  const [contradictions, setContradictions] = useState<MemoryContradictionItem[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const latest = data.sleepRuns[0];
   const staleIds = new Set(latest?.staleMemoryIds ?? []);
   const staleMemories = data.memories.filter((memory) => staleIds.has(memory.id));
+
+  useEffect(() => {
+    let active = true;
+    void getMemoryContradictions()
+      .then((res) => {
+        if (active && Array.isArray(res.contradictions)) {
+          setContradictions(res.contradictions);
+        }
+      })
+      .catch(() => {
+        // Fallback: contradictions remain empty if offline
+      });
+    return () => {
+      active = false;
+    };
+  }, [data.memories]);
+
+  const handleKeepMemory = async (kept: LocalMemory, archived: LocalMemory) => {
+    setActionError(null);
+    try {
+      await apiEditMemory(archived.id, { status: 'archived' });
+      update((previous) => ({
+        ...previous,
+        memories: previous.memories.map((m) =>
+          m.id === archived.id ? { ...m, status: 'archived', updatedAt: new Date().toISOString() } : m,
+        ),
+      }));
+      setContradictions((prev) =>
+        prev.filter((c) => c.memoryA.id !== archived.id && c.memoryB.id !== archived.id),
+      );
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to archive conflicting memory.');
+    }
+  };
+
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title="Morning Report" subtitle="A summary of the latest local Sleep Cycle check." />
+      <PageHeader title="Morning Report" subtitle="A summary of the latest Sleep Cycle and memory consistency check." />
       <StorageNotice error={storageError} />
+      {actionError && (
+        <p className="surface-card p-4 text-sm text-rose-200" role="alert">
+          {actionError}
+        </p>
+      )}
+
+      {/* Scheduler Status */}
+      <div className="flex items-center gap-2.5 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs">
+        <ShieldCheck size={16} className="text-emerald-400 shrink-0" />
+        <span className="text-white/80">
+          Automated Daily Staleness Review:{' '}
+          <strong className="text-white font-medium">
+            {apiStatus?.scheduledJobs ? 'Active & Monitored' : 'Manual Trigger Only'}
+          </strong>
+        </span>
+      </div>
+
+      {/* Contradiction Detection Section */}
+      {contradictions.length > 0 && (
+        <Card>
+          <div className="flex items-center gap-2 text-amber-300 mb-2">
+            <AlertTriangle size={18} />
+            <h2 className="font-medium text-white text-base">Memory Contradiction Review</h2>
+          </div>
+          <p className="text-sm text-white/70 mb-4 leading-relaxed">
+            Somnia detected {contradictions.length} conflicting {contradictions.length === 1 ? 'pair' : 'pairs'} among your approved memories.
+            Select which fact to retain as current:
+          </p>
+          <div className="space-y-4">
+            {contradictions.map((c, idx) => (
+              <div key={idx} className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+                <p className="text-xs font-semibold text-amber-200 mb-3">{c.reason}</p>
+                <div className="grid gap-3 sm:grid-cols-2 text-sm text-white/90">
+                  <div className="rounded-lg bg-black/40 p-3.5 border border-white/10 flex flex-col justify-between">
+                    <div>
+                      <p className="text-xs text-white/50 mb-1.5">Memory 1 · Added {formatDate(c.memoryA.createdAt)}</p>
+                      <p className="font-medium leading-relaxed">"{c.memoryA.text}"</p>
+                    </div>
+                    <button
+                      onClick={() => void handleKeepMemory(c.memoryA, c.memoryB)}
+                      className="mt-3.5 inline-flex items-center justify-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/30 transition-colors"
+                    >
+                      <Check size={13} /> Keep Memory 1 (Archive Memory 2)
+                    </button>
+                  </div>
+                  <div className="rounded-lg bg-black/40 p-3.5 border border-white/10 flex flex-col justify-between">
+                    <div>
+                      <p className="text-xs text-white/50 mb-1.5">Memory 2 · Added {formatDate(c.memoryB.createdAt)}</p>
+                      <p className="font-medium leading-relaxed">"{c.memoryB.text}"</p>
+                    </div>
+                    <button
+                      onClick={() => void handleKeepMemory(c.memoryB, c.memoryA)}
+                      className="mt-3.5 inline-flex items-center justify-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/30 transition-colors"
+                    >
+                      <Check size={13} /> Keep Memory 2 (Archive Memory 1)
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {!latest ? (
         <Card>
           <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
-            There is no report yet. Run Sleep Cycle to create a report from an actual backend review.
+            There is no Sleep Cycle report yet. Run Sleep Cycle to inspect memory staleness.
           </p>
         </Card>
       ) : (
         <Card>
           <h2 className="font-medium text-white">Review from {formatDate(latest.startedAt)}</h2>
           <p className="mt-2 text-sm" style={{ color: 'var(--text-muted)' }}>
-            The rules-based check found {staleMemories.length} memory {staleMemories.length === 1 ? 'to review' : 'items to review'}.
-            No AI-generated proposals or replay evaluation were produced.
+            The rules-based staleness check found {staleMemories.length} memory {staleMemories.length === 1 ? 'to review' : 'items to review'}.
           </p>
           {staleMemories.map((memory) => (
             <div className="mt-4 rounded-xl border border-white/10 p-4" key={memory.id}>
               <p className="text-sm text-white/85">{memory.text}</p>
               <p className="mt-2 text-xs" style={{ color: 'var(--text-faint)' }}>
-                Last updated {formatDate(memory.updatedAt)} · Review manually in Memories.
+                Last updated {formatDate(memory.updatedAt)} · Review or edit in Memories screen.
               </p>
             </div>
           ))}

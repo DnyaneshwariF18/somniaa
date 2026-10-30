@@ -21,6 +21,6 @@ Use Node.js 22.13+ and `npm run dev:all`. Vite proxies `/api` to the backend on 
 
 ## Boundaries
 
-The backend is a single-user local MVP, not a production multi-user service. It has no login, account isolation, remote hosting, database encryption, notification delivery, or configured scheduler. Keep it on loopback. Browser storage is retained as a cache, not a secure vault.
+The backend is a single-user local application, not a multi-user hosted service. It has no login, account isolation, remote hosting, or database encryption. Keep it bound to loopback (`127.0.0.1`). Browser storage is retained as a cache, not a secure vault.
 
-The AI adapter does not retrain models or store provider-side data itself. External requests are made only when the provider is configured and the user enables sharing in Settings. The initial Sleep Cycle only flags approved memories older than 180 days; it does not apply changes or generate evaluation scores.
+The AI adapter does not retrain models or store provider-side data itself. External requests are made only when the provider is configured and the user enables sharing in Settings. Memory proposal extraction and contradiction detection run safely in both AI and offline demo modes. The Sleep Cycle features an automated background scheduler alongside manual on-demand triggers to review approved memories for staleness. In-app and desktop browser notifications provide real-time alerts for due reminders.

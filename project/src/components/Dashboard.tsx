@@ -8,9 +8,14 @@ interface DashboardProps {
 }
 
 export default function Dashboard({ data, onNavigate }: DashboardProps) {
-  const nextReminder = data.reminders
-    .filter((reminder) => !reminder.completedAt && Date.parse(reminder.dueAt) >= Date.now())
+  const now = Date.now();
+  const overdueReminders = data.reminders
+    .filter((reminder) => !reminder.completedAt && Date.parse(reminder.dueAt) < now)
+    .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+  const nextUpcoming = data.reminders
+    .filter((reminder) => !reminder.completedAt && Date.parse(reminder.dueAt) >= now)
     .sort((a, b) => a.dueAt.localeCompare(b.dueAt))[0];
+  const activeReminder = overdueReminders[0] || nextUpcoming;
   const hasActivity =
     data.messages.length > 0 ||
     data.memories.length > 0 ||
@@ -92,13 +97,22 @@ export default function Dashboard({ data, onNavigate }: DashboardProps) {
         ) : (
           <>
             <button className="surface-card p-5 text-left" onClick={() => onNavigate('reminders')}>
-              <span className="text-xs uppercase tracking-wider" style={{ color: 'var(--text-faint)' }}>Next reminder</span>
+              <div className="flex items-center justify-between">
+                <span className="text-xs uppercase tracking-wider" style={{ color: 'var(--text-faint)' }}>
+                  {overdueReminders.length > 0 ? 'Due reminder' : 'Next reminder'}
+                </span>
+                {overdueReminders.length > 0 && (
+                  <span className="rounded-full bg-amber-500/20 border border-amber-500/30 px-2 py-0.5 text-[10px] font-semibold text-amber-200">
+                    {overdueReminders.length} overdue
+                  </span>
+                )}
+              </div>
               <p className="mt-2 text-sm text-white">
-                {nextReminder ? nextReminder.title : 'No upcoming reminders'}
+                {activeReminder ? activeReminder.title : 'No upcoming reminders'}
               </p>
-              {nextReminder && (
-                <p className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-                  {new Date(nextReminder.dueAt).toLocaleString()}
+              {activeReminder && (
+                <p className="mt-1 text-xs" style={{ color: overdueReminders.length > 0 ? '#fca5a5' : 'var(--text-muted)' }}>
+                  {new Date(activeReminder.dueAt).toLocaleString()}
                 </p>
               )}
             </button>

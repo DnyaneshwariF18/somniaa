@@ -6,9 +6,10 @@ import type { ScreenId } from '@/navigation';
 interface AppNavigationProps {
   active: ScreenId;
   onNavigate: (id: ScreenId) => void;
+  dueReminderCount?: number;
 }
 
-export default function AppNavigation({ active, onNavigate }: AppNavigationProps) {
+export default function AppNavigation({ active, onNavigate, dueReminderCount }: AppNavigationProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
@@ -43,6 +44,8 @@ export default function AppNavigation({ active, onNavigate }: AppNavigationProps
   const links = NAV_DESTINATIONS.map((d) => {
     const Icon = d.icon;
     const isActive = d.id === active;
+    const isReminder = d.id === 'reminders';
+    const showBadge = isReminder && typeof dueReminderCount === 'number' && dueReminderCount > 0;
     return (
       <button
         key={d.id}
@@ -52,6 +55,11 @@ export default function AppNavigation({ active, onNavigate }: AppNavigationProps
       >
         <Icon size={18} className="shrink-0" />
         <span className="truncate">{d.label}</span>
+        {showBadge && (
+          <span className="ml-auto flex h-5 min-w-[20px] items-center justify-center rounded-full bg-amber-500/25 px-1.5 text-[11px] font-semibold text-amber-200 border border-amber-400/40">
+            {dueReminderCount}
+          </span>
+        )}
       </button>
     );
   });
@@ -136,6 +144,11 @@ export default function AppNavigation({ active, onNavigate }: AppNavigationProps
               >
                 <Icon size={20} className="shrink-0" />
                 <span>{d.label}</span>
+                {d.id === 'reminders' && typeof dueReminderCount === 'number' && dueReminderCount > 0 && (
+                  <span className="ml-auto flex h-5 min-w-[20px] items-center justify-center rounded-full bg-amber-500/25 px-1.5 text-[11px] font-semibold text-amber-200 border border-amber-400/40">
+                    {dueReminderCount}
+                  </span>
+                )}
               </button>
             );
           })}
