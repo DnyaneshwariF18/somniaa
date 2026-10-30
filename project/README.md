@@ -33,3 +33,8 @@ To run only one process, use `npm run dev:backend` or `npm run dev:frontend`; th
 - An enabled external provider receives the limited context described above. Review its privacy and data-processing terms before opting in.
 
 See `ARCHITECTURE.md`, `DATABASE_SCHEMA.md`, `API_SPEC.md`, `AI_MEMORY_DESIGN.md`, `SLEEP_CYCLE_DESIGN.md`, and `SECURITY_PRIVACY.md` for the current design and limitations.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
